@@ -26,22 +26,38 @@ Extraire de la tâche en cours un besoin en 2-4 mots-clés anglais (l'index GitH
 python3 scripts/find_best_repo.py "MOTS CLES" --language LANGAGE --top 5
 ```
 
-Le script interroge l'API GitHub Search, trie par étoiles, puis applique un score pondéré :
+Le script choisit automatiquement la source la plus fiable pour l'écosystème visé (voir « Sources par écosystème » ci-dessous), puis applique un score pondéré :
 
 ```
-score = étoiles × facteur_fraîcheur(dernier push)
+score = métrique d'adoption × facteur_fraîcheur(dernière mise à jour)
 ```
 
-- Push < 1 mois : ×1.0
-- Push < 6 mois : ×0.9
-- Push < 12 mois : ×0.7
-- Push < 24 mois : ×0.4
+où la métrique d'adoption est les étoiles GitHub, les téléchargements hebdo npm, ou les téléchargements crates.io selon la source utilisée (voir plus bas).
+
+- Mise à jour < 1 mois : ×1.0
+- < 6 mois : ×0.9
+- < 12 mois : ×0.7
+- < 24 mois : ×0.4
 - Au-delà : ×0.15
-- Repos archivés : exclus d'office
+- Repos/paquets archivés : exclus d'office
 
 Ce scoring évite le piège classique : le repo à 50k étoiles mort depuis 3 ans qui bat en apparence le repo à 8k étoiles activement maintenu.
 
+La sortie JSON contient un champ `source` (registre effectivement utilisé) et chaque résultat porte un champ `metric` (`github_stars`, `npm_weekly_downloads` ou `crates_downloads`) : reprendre ce libellé exact en une ligne à l'utilisateur plutôt que de toujours dire « étoiles ».
+
 Si le meilleur score est faible (< 500), relancer UNE fois sans `--language` et/ou avec des mots-clés reformulés. Le filtre langage exclut les repos dont le langage principal déclaré diffère, ce qui rate parfois les gros repos.
+
+### Sources par écosystème (optimisation par outil)
+
+Les étoiles GitHub sont un signal biaisé pour les écosystèmes qui ont leur propre registre avec de vrais chiffres d'usage : une lib peut être massivement utilisée en production sans jamais avoir été « starred ». Le script s'adapte donc :
+
+| `--language` | Source utilisée | Métrique |
+|---|---|---|
+| `javascript`, `typescript`, `js`, `ts`, `node` | npm | téléchargements hebdomadaires réels |
+| `rust` | crates.io | téléchargements totaux |
+| tout le reste (`python`, `go`, `java`...) | GitHub | étoiles |
+
+Forcer une source précise avec `--registry {auto,github,npm,crates}` (utile si `--language` n'est pas fourni ou si on veut comparer). Si la source native de l'écosystème est injoignable (réseau restreint), le script bascule seul sur GitHub et le signale sur stderr : ne pas s'en inquiéter, le résultat reste utilisable, juste avec une métrique différente (`metric` dans la sortie le précise).
 
 ### 3. Sélectionner
 
@@ -82,4 +98,13 @@ Ensuite, continuer la tâche de l'utilisateur avec l'outil intégré. Le skill n
 
 ## Limites réseau
 
-Seuls github.com, api.github.com, raw.githubusercontent.com, pypi.org, npmjs.com (et miroirs) sont accessibles. Un repo dont l'installation exige un domaine hors liste : passer au suivant.
+Domaines utilisés : github.com, api.github.com, raw.githubusercontent.com, pypi.org, npmjs.com, registry.npmjs.org, api.npmjs.org, crates.io (et miroirs). Un repo dont l'installation exige un domaine hors liste : passer au suivant.
+
+## Marcher dans n'importe quelle condition
+
+Le script est conçu pour ne jamais bloquer la tâche en cours, même en environnement contraint :
+
+- **Quota GitHub dépassé** (60 requêtes/heure sans jeton) : le script le détecte explicitement et le dit (au lieu d'une erreur réseau confuse). Si `GITHUB_TOKEN` ou `GH_TOKEN` est présent dans l'environnement, ou si le CLI `gh` est authentifié (`gh auth token`), le quota passe à 5000/heure automatiquement, sans rien à faire de plus. Si une recherche échoue pour cette raison et qu'aucun jeton n'est disponible, proposer à l'utilisateur d'en configurer un, ou attendre le délai indiqué.
+- **Source de l'écosystème injoignable** (registry.npmjs.org ou crates.io bloqué par le réseau) : repli automatique et silencieux sur GitHub, signalé sur stderr. Ne pas s'interrompre pour ça.
+- **Panne réseau totale ou GitHub injoignable** (sandbox sans accès internet, domaine bloqué au niveau plateforme) : le script sort avec un code 3 et un message structuré (`network_unavailable: true`). Dans ce cas précis, **ne jamais bloquer la tâche de l'utilisateur** : le dire en une ligne, proposer la librairie la plus réputée de sa connaissance générale en la signalant explicitement comme non vérifiée (pas de score, pas de garantie de fraîcheur), et continuer le travail avec ce choix par défaut.
+- **Erreurs transitoires** (timeout, coupure momentanée, 5xx) : nouvelles tentatives automatiques avec délai croissant, invisibles pour l'appelant. Aucune action à prendre.
