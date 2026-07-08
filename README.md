@@ -42,6 +42,16 @@ GitHub stars are a biased signal for ecosystems that have their own registry wit
 
 Force a specific source with `--registry {auto,github,npm,crates}`.
 
+## Project-aware, not just ecosystem-aware
+
+`--auto` reads the actual project you're working in, no guessing:
+
+```bash
+python3 scripts/find_best_repo.py "http client" --auto
+```
+
+It walks up from the current directory looking for `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `composer.json` or `Gemfile` (and their lockfiles) to figure out the exact language, package manager (pnpm/yarn/bun/npm, poetry/uv/pipenv/pip, cargo, go modules, composer, bundler) and the dependencies already installed. The result includes an `install_cmd_template` matching that project's own tooling (`pnpm add {name}`, `poetry add {name}`, `cargo add {name}`...) instead of a generic `pip install`/`npm install`, plus the list of existing dependencies so a need already covered by something in the project doesn't get a redundant suggestion.
+
 ## Built to keep working
 
 - **Higher GitHub quota, automatically.** Unauthenticated search is capped at 60 requests/hour. Set `GITHUB_TOKEN` (or `GH_TOKEN`), or just have the `gh` CLI authenticated, and StarPilot picks it up on its own for a 5000/hour quota.
@@ -87,7 +97,7 @@ StarPilot is not a destination, it's an accelerator. One search per need, one li
 
 ## 🇫🇷 En bref
 
-StarPilot est un skill Claude qui détecte automatiquement le meilleur outil pour la tâche en cours (score = métrique d'adoption pondérée par la fraîcheur de maintenance), l'installe et continue le travail. Zéro prompt, zéro repo zombie. Il interroge la source la plus pertinente par écosystème (npm pour JS/TS, crates.io pour Rust, GitHub sinon), avec repli automatique si une source est injoignable.
+StarPilot est un skill Claude qui détecte automatiquement le meilleur outil pour la tâche en cours (score = métrique d'adoption pondérée par la fraîcheur de maintenance), l'installe et continue le travail. Zéro prompt, zéro repo zombie. Il interroge la source la plus pertinente par écosystème (npm pour JS/TS, crates.io pour Rust, GitHub sinon), avec repli automatique si une source est injoignable. Avec `--auto`, il lit en plus les vrais fichiers du projet en cours pour connaître le langage, le gestionnaire de paquets exact et les dépendances déjà installées, au lieu de deviner.
 
 ## License
 

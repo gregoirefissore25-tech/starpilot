@@ -9,6 +9,7 @@ Usage:
     python3 find_best_repo.py "date formatting" --language rust
     python3 find_best_repo.py "backtesting trading" --min-stars 500
     python3 find_best_repo.py "http client" --registry npm --top 3
+    python3 find_best_repo.py "date formatting" --auto   # detecte le langage/gestionnaire du projet en cours
 
 Score = metrique d'adoption ponderee par la fraicheur de maintenance.
 Un repo a 50k etoiles abandonne depuis 3 ans peut perdre face
@@ -39,6 +40,7 @@ Resilience ("marcher dans n'importe quelle condition") :
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -278,6 +280,183 @@ def search_crates(query: str, min_stars: int, top: int):
     return results[:top]
 
 
+def _read(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _parse_json_deps(path: str, keys: tuple) -> list:
+    try:
+        data = json.loads(_read(path) or "{}")
+    except json.JSONDecodeError:
+        return []
+    names = []
+    for k in keys:
+        names.extend((data.get(k) or {}).keys())
+    return names
+
+
+def _parse_requirements_txt(path: str) -> list:
+    names = []
+    for line in _read(path).splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "-")):
+            continue
+        name = re.split(r"[<>=!~\[; ]", line, 1)[0].strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _parse_pyproject_toml(path: str) -> list:
+    text = _read(path)
+    names = []
+    m = re.search(r"dependencies\s*=\s*\[(.*?)\]", text, re.S)
+    if m:
+        for item in re.findall(r'"([^"]*)"', m.group(1)):
+            name = re.split(r"[<>=!~\[; ]", item, 1)[0].strip()
+            if name:
+                names.append(name)
+    m = re.search(r"\[tool\.poetry\.dependencies\](.*?)(?=\n\[|\Z)", text, re.S)
+    if m:
+        for line in m.group(1).splitlines():
+            key = line.split("=", 1)[0].strip().strip('"')
+            if key and key.lower() != "python":
+                names.append(key)
+    return names
+
+
+def _pyproject_uses_poetry(path: str) -> bool:
+    return "[tool.poetry]" in _read(path)
+
+
+def _parse_cargo_toml(path: str) -> list:
+    text = _read(path)
+    names = []
+    for section in re.findall(r"\[dependencies(?:\.\S+)?\](.*?)(?=\n\[|\Z)", text, re.S):
+        for line in section.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key = line.split("=", 1)[0].strip().strip('"')
+            if key:
+                names.append(key)
+    return names
+
+
+def _parse_go_mod(path: str) -> list:
+    names = []
+    in_block = False
+    for line in _read(path).splitlines():
+        line = line.strip()
+        if line.startswith("require ("):
+            in_block = True
+            continue
+        if in_block and line == ")":
+            in_block = False
+            continue
+        target = line[len("require "):] if (not in_block and line.startswith("require ")) else (line if in_block else "")
+        parts = target.split()
+        if parts:
+            names.append(parts[0])
+    return names
+
+
+def detect_project(start_dir: str | None = None):
+    """Detecte l'ecosysteme du projet EN COURS a partir de ses vrais fichiers
+    de manifeste et de verrou (pas d'un --language devine), pour choisir la
+    bonne source ET la commande d'installation qui correspond aux outils
+    deja utilises par ce projet precis. Remonte jusqu'a 5 dossiers parents,
+    au cas ou l'appel se fasse depuis un sous-dossier."""
+    d = os.path.abspath(start_dir or os.getcwd())
+    for _ in range(5):
+        pkg_json = os.path.join(d, "package.json")
+        if os.path.isfile(pkg_json):
+            if os.path.isfile(os.path.join(d, "bun.lockb")):
+                pm = "bun"
+            elif os.path.isfile(os.path.join(d, "pnpm-lock.yaml")):
+                pm = "pnpm"
+            elif os.path.isfile(os.path.join(d, "yarn.lock")):
+                pm = "yarn"
+            else:
+                pm = "npm"
+            install_tpl = {"npm": "npm install {name}", "pnpm": "pnpm add {name}",
+                           "yarn": "yarn add {name}", "bun": "bun add {name}"}[pm]
+            lang = "typescript" if os.path.isfile(os.path.join(d, "tsconfig.json")) else "javascript"
+            return {
+                "language": lang, "package_manager": pm, "manifest": pkg_json,
+                "install_cmd_template": install_tpl,
+                "existing_dependencies": sorted(set(_parse_json_deps(pkg_json, ("dependencies", "devDependencies")))),
+            }
+
+        cargo_toml = os.path.join(d, "Cargo.toml")
+        if os.path.isfile(cargo_toml):
+            return {
+                "language": "rust", "package_manager": "cargo", "manifest": cargo_toml,
+                "install_cmd_template": "cargo add {name}",
+                "existing_dependencies": sorted(set(_parse_cargo_toml(cargo_toml))),
+            }
+
+        go_mod = os.path.join(d, "go.mod")
+        if os.path.isfile(go_mod):
+            return {
+                "language": "go", "package_manager": "go modules", "manifest": go_mod,
+                "install_cmd_template": "go get {name}",
+                "existing_dependencies": sorted(set(_parse_go_mod(go_mod))),
+            }
+
+        pyproject = os.path.join(d, "pyproject.toml")
+        requirements = os.path.join(d, "requirements.txt")
+        pipfile = os.path.join(d, "Pipfile")
+        if os.path.isfile(pyproject) or os.path.isfile(requirements) or os.path.isfile(pipfile):
+            deps = []
+            if os.path.isfile(pyproject):
+                deps += _parse_pyproject_toml(pyproject)
+            if os.path.isfile(requirements):
+                deps += _parse_requirements_txt(requirements)
+            if os.path.isfile(os.path.join(d, "uv.lock")):
+                pm = "uv"
+            elif os.path.isfile(pyproject) and _pyproject_uses_poetry(pyproject):
+                pm = "poetry"
+            elif os.path.isfile(pipfile):
+                pm = "pipenv"
+            else:
+                pm = "pip"
+            install_tpl = {"pip": "pip install {name}", "poetry": "poetry add {name}",
+                           "uv": "uv add {name}", "pipenv": "pipenv install {name}"}[pm]
+            manifest = requirements if os.path.isfile(requirements) else (pyproject if os.path.isfile(pyproject) else pipfile)
+            return {
+                "language": "python", "package_manager": pm, "manifest": manifest,
+                "install_cmd_template": install_tpl,
+                "existing_dependencies": sorted(set(deps)),
+            }
+
+        composer = os.path.join(d, "composer.json")
+        if os.path.isfile(composer):
+            return {
+                "language": "php", "package_manager": "composer", "manifest": composer,
+                "install_cmd_template": "composer require {name}",
+                "existing_dependencies": sorted(set(_parse_json_deps(composer, ("require", "require-dev")))),
+            }
+
+        gemfile = os.path.join(d, "Gemfile")
+        if os.path.isfile(gemfile):
+            return {
+                "language": "ruby", "package_manager": "bundler", "manifest": gemfile,
+                "install_cmd_template": "bundle add {name}",
+                "existing_dependencies": [],
+            }
+
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
 def pick_registry(explicit: str, language: str | None) -> str:
     if explicit and explicit != "auto":
         return explicit
@@ -327,10 +506,23 @@ if __name__ == "__main__":
                     help="Seuil minimal sur la metrique d'adoption (etoiles, "
                          "telechargements hebdo npm, ou telechargements crates.io).")
     p.add_argument("--top", type=int, default=5)
+    p.add_argument("--auto", action="store_true",
+                    help="Detecte le langage et le gestionnaire de paquets du projet en cours "
+                         "(package.json, pyproject.toml, Cargo.toml, go.mod...) au lieu de deviner "
+                         "--language. Ne remplace jamais une valeur --language explicite.")
+    p.add_argument("--project-dir", default=None,
+                    help="Dossier de depart pour --auto (par defaut : dossier courant).")
     args = p.parse_args()
 
+    project = None
+    language = args.language
+    if args.auto:
+        project = detect_project(args.project_dir)
+        if project and not language:
+            language = project["language"]
+
     try:
-        results, used_source = search(args.query, args.language, args.min_stars, args.top, args.registry)
+        results, used_source = search(args.query, language, args.min_stars, args.top, args.registry)
     except RateLimitError as e:
         print(json.dumps({"error": str(e), "rate_limited": True}), file=sys.stderr)
         sys.exit(2)
@@ -346,4 +538,7 @@ if __name__ == "__main__":
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
 
-    print(json.dumps({"source": used_source, "results": results}, indent=2, ensure_ascii=False))
+    out = {"source": used_source, "results": results}
+    if args.auto:
+        out["project"] = project
+    print(json.dumps(out, indent=2, ensure_ascii=False))

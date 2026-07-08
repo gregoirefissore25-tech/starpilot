@@ -1,11 +1,11 @@
 ---
 name: starpilot
-description: Détecte et intègre automatiquement les meilleurs repos GitHub (classés par étoiles et fraîcheur de maintenance) pour accélérer la tâche en cours. Utiliser ce skill de manière proactive, SANS que l'utilisateur le demande, dès qu'une tâche de code, d'automatisation, de data, de scraping, d'UI, de parsing, de conversion de fichiers, de trading, d'API ou de build pourrait être résolue plus vite ou mieux avec une librairie ou un outil open source existant. Déclencher aussi quand l'utilisateur dit "trouve un repo", "meilleure librairie", "outil open source", "qu'est-ce qui existe déjà", "top GitHub", ou hésite entre plusieurs librairies. Ne PAS déclencher pour du texte pur, des emails, ou des questions sans composante technique.
+description: Détecte et intègre automatiquement le meilleur outil open source (repo GitHub, paquet npm ou crate Rust selon l'écosystème) pour accélérer la tâche en cours, en s'adaptant au projet réel en cours (langage, gestionnaire de paquets, dépendances déjà installées détectés depuis package.json/pyproject.toml/Cargo.toml/go.mod...) plutôt qu'à une recherche générique. Utiliser ce skill de manière proactive, SANS que l'utilisateur le demande, dès qu'une tâche de code, d'automatisation, de data, de scraping, d'UI, de parsing, de conversion de fichiers, de trading, d'API ou de build pourrait être résolue plus vite ou mieux avec une librairie ou un outil open source existant. Déclencher aussi quand l'utilisateur dit "trouve un repo", "meilleure librairie", "outil open source", "qu'est-ce qui existe déjà", "top GitHub", ou hésite entre plusieurs librairies. Ne PAS déclencher pour du texte pur, des emails, ou des questions sans composante technique.
 ---
 
 # StarPilot
 
-Trouve le meilleur repo GitHub pour le besoin en cours, l'évalue, et l'intègre directement dans la session de travail. L'utilisateur n'a rien à faire : le skill se déclenche seul quand une tâche technique pourrait bénéficier d'un outil open source existant.
+Trouve le meilleur outil open source pour le besoin en cours (GitHub, npm ou crates.io selon l'écosystème du projet réel), l'évalue, et l'intègre directement dans la session de travail avec la commande d'installation qui correspond aux outils déjà en place. L'utilisateur n'a rien à faire : le skill se déclenche seul quand une tâche technique pourrait bénéficier d'un outil open source existant.
 
 ## Principe
 
@@ -23,10 +23,12 @@ Extraire de la tâche en cours un besoin en 2-4 mots-clés anglais (l'index GitH
 ### 2. Chercher et scorer
 
 ```bash
-python3 scripts/find_best_repo.py "MOTS CLES" --language LANGAGE --top 5
+python3 scripts/find_best_repo.py "MOTS CLES" --auto --top 5
 ```
 
-Le script choisit automatiquement la source la plus fiable pour l'écosystème visé (voir « Sources par écosystème » ci-dessous), puis applique un score pondéré :
+`--auto` est la forme par défaut : il lit les vrais fichiers du projet en cours (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `composer.json`, `Gemfile`, et leurs lockfiles) pour connaître le langage, le gestionnaire de paquets exact (pnpm/yarn/bun/npm, poetry/uv/pipenv/pip, cargo, go modules, composer, bundler) et les dépendances déjà installées, au lieu de deviner `--language` depuis le contexte de la tâche. Il remonte jusqu'à 5 dossiers parents si l'appel se fait depuis un sous-dossier. Utiliser `--project-dir CHEMIN` si le dossier courant n'est pas la racine du projet, et `--language LANGAGE` en explicite uniquement quand `--auto` ne trouve rien (projet vide, prototype sans manifeste) ou pour forcer un langage différent de celui détecté.
+
+Le script choisit automatiquement la source la plus fiable pour l'écosystème détecté (voir « Sources par écosystème » ci-dessous), puis applique un score pondéré :
 
 ```
 score = métrique d'adoption × facteur_fraîcheur(dernière mise à jour)
@@ -61,18 +63,27 @@ Forcer une source précise avec `--registry {auto,github,npm,crates}` (utile si 
 
 ### 3. Sélectionner
 
-Choisir le repo #1 par score, sauf si :
+**D'abord, vérifier qu'on ne réinvente pas ce qui existe déjà** : la sortie de `--auto` inclut `project.existing_dependencies`, la liste réelle des dépendances déjà déclarées dans le projet. Si l'une d'elles couvre déjà le besoin (ex. `axios` déjà présent alors qu'on cherche un client HTTP), le dire et la réutiliser directement, sans chercher ni installer quoi que ce soit de nouveau.
+
+Sinon, choisir le repo #1 par score, sauf si :
 - **Licence incompatible** : NONE, GPL sur un projet commercial fermé → prendre le suivant (MIT, Apache-2.0, BSD sont sûrs)
 - **Overkill** : un framework de 200k lignes pour un besoin de 30 lignes → coder soi-même
 - **Pas de match réel** : si le meilleur score est faible (< 500) ou hors sujet, coder from scratch et le dire
 
-Annoncer le choix en une ligne : nom, étoiles, licence, dernier push, pourquoi lui.
+Annoncer le choix en une ligne : nom, métrique d'adoption (étoiles ou téléchargements, voir `metric`), licence, dernier push, pourquoi lui.
 
 ### 4. Intégrer immédiatement
 
-Selon le type de repo :
+Utiliser le `install_cmd_template` de `project` (sortie de `--auto`) pour respecter exactement le gestionnaire de paquets déjà en place dans le projet, plutôt qu'une commande générique :
 
-**Librairie packagée** (le plus fréquent) :
+```bash
+# install_cmd_template = "pnpm add {name}" -> pnpm add axios
+# install_cmd_template = "poetry add {name}" -> poetry add requests
+# install_cmd_template = "cargo add {name}" -> cargo add serde
+```
+
+Si `--auto` n'a rien détecté (pas de manifeste trouvé), retomber sur la commande générique de l'écosystème :
+
 ```bash
 pip install NOM --break-system-packages   # Python
 npm install NOM                            # Node
