@@ -15,10 +15,16 @@ a un repo a 8k etoiles pousse la semaine derniere.
 import argparse
 import json
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
 API = "https://api.github.com/search/repositories"
+
+
+class RateLimitError(Exception):
+    """Quota GitHub API depasse (60 requetes/heure sans cle)."""
 
 
 def months_since(iso_date: str) -> float:
@@ -48,8 +54,19 @@ def search(query: str, language: str | None, min_stars: int, top: int):
     url = f"{API}?q={urllib.parse.quote(q)}&sort=stars&order=desc&per_page={max(top * 3, 15)}"
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                "User-Agent": "claude-skill-github-autopilot"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        data = json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        remaining = e.headers.get("X-RateLimit-Remaining") if e.headers else None
+        reset = e.headers.get("X-RateLimit-Reset") if e.headers else None
+        if e.code == 403 and remaining == "0":
+            wait_s = max(0, int(reset) - int(datetime.now(timezone.utc).timestamp())) if reset else None
+            msg = "Quota GitHub API depasse (60 requetes/heure sans cle)."
+            if wait_s is not None:
+                msg += f" Reessayer dans ~{wait_s // 60} min."
+            raise RateLimitError(msg) from e
+        raise
 
     results = []
     for item in data.get("items", []):
@@ -75,7 +92,12 @@ def search(query: str, language: str | None, min_stars: int, top: int):
 
 
 if __name__ == "__main__":
-    import urllib.parse
+    # Certaines consoles (Windows/cp1252) plantent sur les caracteres Unicode
+    # que peuvent contenir des descriptions de repos (emoji, fleches, accents rares).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     p = argparse.ArgumentParser()
     p.add_argument("query")
     p.add_argument("--language", default=None)
@@ -85,6 +107,9 @@ if __name__ == "__main__":
 
     try:
         results = search(args.query, args.language, args.min_stars, args.top)
+    except RateLimitError as e:
+        print(json.dumps({"error": str(e), "rate_limited": True}), file=sys.stderr)
+        sys.exit(2)
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
         sys.exit(1)
